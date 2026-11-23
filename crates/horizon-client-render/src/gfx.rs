@@ -8073,7 +8073,7 @@ impl Renderer {
                     &config,
                 );
                 if frames.is_some() {
-                    frame_gen.world(device, &self.world_post, &self.config, format);
+                    frame_gen.world(device, &config, format);
                 }
                 frames
             });

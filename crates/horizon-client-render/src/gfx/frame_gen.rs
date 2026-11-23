@@ -91,6 +91,12 @@ pub struct FrameGen {
 
 /// What runs on the GPU for one screen size.
 struct Gpu {
+    /// The frame-generation frames' own post: its pipelines write their surface
+    /// format, where the renderer's `Post` writes the frame's (a pack's float
+    /// one). The groups it binds sample the same float textures.
+    present: super::world_post::Post,
+    present_world: wgpu::BindGroup,
+    present_output: wgpu::BindGroup,
     size: [u32; 2],
     format: wgpu::TextureFormat,
     flow: optical_flow::OpticalFlow,
@@ -98,8 +104,6 @@ struct Gpu {
     /// This frame's world at the screen's size, and bindings that copy it or the
     /// interpolation's output (`Post::finish_with`).
     world: wgpu::TextureView,
-    world_group: wgpu::BindGroup,
-    output_group: wgpu::BindGroup,
     /// The next interpolation has no previous frame.
     reset: bool,
 }
@@ -285,7 +289,6 @@ impl FrameGen {
     pub fn world(
         &mut self,
         device: &wgpu::Device,
-        post: &super::world_post::Post,
         config: &wgpu::SurfaceConfiguration,
         format: wgpu::TextureFormat,
     ) -> wgpu::TextureView {
@@ -310,19 +313,21 @@ impl FrameGen {
                     // COPY_SRC: the interpolation keeps it as the previous frame.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC
-                        // A native pack's composed real frame is copied in as the world.
-                        | wgpu::TextureUsages::COPY_DST,
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 })
                 .create_view(&Default::default());
             let interpolation = interpolation::Interpolation::new(device, size);
+            let present = super::world_post::Post::new(device, config.format);
+            let present_world = present.bind(device, &world);
+            let present_output = present.bind(device, interpolation.output());
             self.gpu = Some(Gpu {
                 size,
                 format,
                 flow: optical_flow::OpticalFlow::new(device, size),
-                world_group: post.bind(device, &world),
-                output_group: post.bind(device, interpolation.output()),
+                present,
+                present_world,
+                present_output,
                 interpolation,
                 world,
                 reset: true,
@@ -336,17 +341,16 @@ impl FrameGen {
     pub fn show_world(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        post: &super::world_post::Post,
         screen: &wgpu::TextureView,
         made: bool,
     ) {
         let gpu = self.gpu.as_ref().expect("world() ran this frame");
         let group = if made {
-            &gpu.output_group
+            &gpu.present_output
         } else {
-            &gpu.world_group
+            &gpu.present_world
         };
-        post.finish_with(encoder, screen, group, None);
+        gpu.present.finish_with(encoder, screen, group, None);
     }
 
     /// Draw the made frame's world onto `generated`. `peak`: on the float frame, the
@@ -358,7 +362,6 @@ impl FrameGen {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        post: &super::world_post::Post,
         generated: &wgpu::TextureView,
         camera: &Camera,
         peak: Option<f32>,
@@ -402,13 +405,16 @@ impl FrameGen {
         );
         gpu.reset = false;
         if debug() == Some("motion") {
-            post.finish_with(encoder, generated, &post.bind(device, &object_motion), None);
+            let group = gpu.present.bind(device, &object_motion);
+            gpu.present.finish_with(encoder, generated, &group, None);
             return true;
         }
         if reset {
-            post.finish_with(encoder, generated, &gpu.world_group, None);
+            gpu.present
+                .finish_with(encoder, generated, &gpu.present_world, None);
         } else {
-            post.finish_with(encoder, generated, &gpu.output_group, None);
+            gpu.present
+                .finish_with(encoder, generated, &gpu.present_output, None);
         }
         !reset
     }
@@ -485,9 +491,7 @@ impl super::Renderer {
         (view_target, target, generated): (&wgpu::TextureView, &wgpu::Texture, &wgpu::Texture),
     ) -> bool {
         let format = self.output.frame.format;
-        let world = self
-            .frame_gen
-            .world(&self.device, &self.world_post, &self.config, format);
+        let world = self.frame_gen.world(&self.device, &self.config, format);
         // A native pack composes the picture itself: its post chain ran in the
         // frame (`run_post` on the scaled world), and its output pass replaces
         // the engine's resolve wherever the picture lands — the frame's world
@@ -547,22 +551,15 @@ impl super::Renderer {
                         resolved: resolved.as_ref(),
                     });
                 } else {
-                    self.frame_gen
-                        .show_world(encoder, &self.world_post, view_target, false);
+                    self.frame_gen.show_world(encoder, view_target, false);
                 }
                 (&generated_view, generated)
             }
         };
         let (device, queue) = (&self.device, &self.queue);
-        let made = self.frame_gen.generate(
-            device,
-            queue,
-            encoder,
-            &self.world_post,
-            made_onto.0,
-            camera,
-            peak,
-        );
+        let made = self
+            .frame_gen
+            .generate(device, queue, encoder, made_onto.0, camera, peak);
         // With HDR output, a reset's world too under the debug view, which shows `generated`.
         if made || peak.is_some() && generated_only() {
             self.draw_overlay(encoder, frame, made_onto.0, made_onto.1, overlay);
@@ -581,8 +578,7 @@ impl super::Renderer {
                     resolved: None,
                 });
             } else {
-                self.frame_gen
-                    .show_world(encoder, &self.world_post, view_target, debug);
+                self.frame_gen.show_world(encoder, view_target, debug);
             }
         }
         made
