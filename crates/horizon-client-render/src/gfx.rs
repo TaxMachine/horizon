@@ -12035,6 +12035,7 @@ impl Renderer {
             self.pack_post = Some((dimension, Some(post)));
         } else if let Some((color, depth)) = &scaled
             && native_post
+            && fg_frames.is_none() // frame generation's branch runs the chain itself
             && let Some(native) = &mut self.external
         {
             native.run_post(external::WorldPost {
@@ -12082,9 +12083,10 @@ impl Renderer {
                 resolved: resolved.as_ref(),
             });
         } else if let (Some((_, generated)), Some((color, depth))) = (&fg_frames, &scaled) {
-            // A native pack's post chain runs here as without frame generation (the
-            // gate allows one only with HORIZON_FRAMEGEN_NATIVE_PACK set): its output
-            // is drawn onto the frame's world and the real frame in draw_generated.
+            // Frame generation owns this frame; the branch above (the ordinary native
+            // one) is skipped for it. A native pack's post chain runs here as without
+            // frame generation, and its output is composed by draw_generated: onto the
+            // readback stand-in at the frame's format, finished onto the real frame.
             if native_post && let Some(native) = self.external.as_mut() {
                 native.run_post(external::WorldPost {
                     device: &self.device,
@@ -12187,12 +12189,12 @@ impl Renderer {
                 });
                 // A made frame interpolates the composed picture: with frame
                 // generation the finished real frame is what optical flow sees.
-                if let (Some(world), true) = (
-                    self.frame_gen.world_texture(),
-                    texture.format() == self.config.format
-                        && self.external.is_some()
-                        && self.output.frame.overlay_format != self.output.frame.format,
-                ) {
+                if let Some(world) = self.frame_gen.world_texture()
+                    && world.size() == texture.size()
+                    && texture.format() == self.config.format
+                    && self.executor.is_some()
+                    && self.output.frame.overlay_format != self.output.frame.format
+                {
                     encoder.copy_texture_to_texture(
                         texture.as_image_copy(),
                         world.as_image_copy(),

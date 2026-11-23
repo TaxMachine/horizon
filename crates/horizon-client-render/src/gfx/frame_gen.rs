@@ -499,7 +499,7 @@ impl super::Renderer {
         // whatever would otherwise show the engine's resolve — the frame's
         // world (which optical flow and the interpolation see) and the real
         // frame — so no vanilla picture leaks between generated frames.
-        let native_tonemap = self.external.is_some() && !frame.title;
+        let native_tonemap = self.executor.is_some() && !frame.title;
         if !native_tonemap {
             let timing = self.own_timing.as_mut();
             self.world_post
