@@ -280,12 +280,6 @@ impl FrameGen {
         pair
     }
 
-    /// The world target's texture, where one was made this frame: for the
-    /// pack-composed picture's copy at the finish step.
-    pub fn world_texture(&self) -> Option<&wgpu::Texture> {
-        self.gpu.as_ref().map(|g| g.world.texture())
-    }
-
     /// The world's target at the screen's size this frame, where `Post::finish` draws, in
     /// the frame's `format`.
     pub fn world(
