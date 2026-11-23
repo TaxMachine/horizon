@@ -495,39 +495,36 @@ impl super::Renderer {
             .frame_gen
             .world(&self.device, &self.world_post, &self.config, format);
         // A native pack composes the picture itself: its post chain ran in the
-        // frame (`run_post` on the scaled world), and its output draws onto
-        // whatever would otherwise show the engine's resolve — the frame's
-        // world (which optical flow and the interpolation see) and the real
-        // frame — so no vanilla picture leaks between generated frames.
+        // frame (`run_post` on the scaled world), and its output pass replaces
+        // the engine's resolve wherever the picture lands — the frame's world
+        // (what optical flow and the interpolation see, at the frame's format)
+        // and the real frame — so no vanilla picture leaks into the made ones.
         let native_tonemap = self.executor.is_some() && !frame.title;
+        // A pack without post passes reads the engine's resolve of the world.
+        let engine_resolve = self.executor.as_ref().is_some_and(|c| c.engine_resolve);
+        let resolved = (native_tonemap && engine_resolve)
+            .then(|| {
+                (self.world_post).resolve_taa_staged(
+                    &self.device,
+                    &mut self.uploads,
+                    encoder,
+                    self.own_timing.as_mut(),
+                )
+            })
+            .flatten()
+            .or_else(|| {
+                let fxaa = (native_tonemap && engine_resolve && self.world_post.antialias)
+                    .then(|| self.world_post.resolved(&self.device))
+                    .flatten()?;
+                self.world_post
+                    .finish(&mut self.uploads, encoder, &fxaa, self.own_timing.as_mut());
+                Some(fxaa)
+            });
         if !native_tonemap {
             let timing = self.own_timing.as_mut();
             self.world_post
                 .finish(&mut self.uploads, encoder, &world, timing);
         } else {
-            let engine_resolve = self.executor.as_ref().is_some_and(|c| c.engine_resolve);
-            let resolved = engine_resolve
-                .then(|| {
-                    (self.world_post).resolve_taa_staged(
-                        &self.device,
-                        &mut self.uploads,
-                        encoder,
-                        self.own_timing.as_mut(),
-                    )
-                })
-                .flatten()
-                .or_else(|| {
-                    let fxaa = (engine_resolve && self.world_post.antialias)
-                        .then(|| self.world_post.resolved(&self.device))
-                        .flatten()?;
-                    self.world_post.finish(
-                        &mut self.uploads,
-                        encoder,
-                        &fxaa,
-                        self.own_timing.as_mut(),
-                    );
-                    Some(fxaa)
-                });
             let native = self.external.as_mut().expect("checked above");
             native.run_output(external::WorldOutput {
                 device: &self.device,
@@ -553,22 +550,8 @@ impl super::Renderer {
                         device: &self.device,
                         encoder,
                         screen: view_target,
-                        resolved: None,
+                        resolved: resolved.as_ref(),
                     });
-                    // The composed real frame is the picture optical flow and
-                    // the interpolation should see: copy it into the frame's
-                    // world (both at the surface's format).
-                    let world = self.frame_gen.world(
-                        &self.device,
-                        &self.world_post,
-                        &self.config,
-                        self.config.format,
-                    );
-                    encoder.copy_texture_to_texture(
-                        target.as_image_copy(),
-                        world.texture().as_image_copy(),
-                        world.texture().size(),
-                    );
                 } else {
                     self.frame_gen
                         .show_world(encoder, &self.world_post, view_target, false);

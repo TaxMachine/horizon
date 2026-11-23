@@ -8058,15 +8058,10 @@ impl Renderer {
         // for them (#13624) frame generation is off until the surface is configured again.
         let fg_frames = if fg {
             let config = self.surface_config();
-            // A pack whose picture finishes on 8 bits (a 0.2 pack in SDR) composes through
-            // the readback stand-in and the finish step: the world optical flow interpolates
-            // is that finished 8-bit frame, copied in at the finish. Every other
-            // configuration draws its frame directly in the frame's format.
-            let format = if self.output.frame.overlay_format != self.output.frame.format {
-                self.output.frame.overlay_format
-            } else {
-                self.output.frame.format
-            };
+            // The world target takes the frame's format: a pack's output pass draws
+            // its composed picture onto it directly, and the engine's resolve does
+            // the same without a pack.
+            let format = self.output.frame.format;
             let (device, frame_gen) = (&self.device, &mut self.frame_gen);
             let made = frame_targets::made(device, frame_targets::Kind::FrameGeneration, || {
                 let frames = frame_gen.frames(
@@ -12187,20 +12182,6 @@ impl Renderer {
                     format: Some(self.output.frame.overlay_format),
                     ..Default::default()
                 });
-                // A made frame interpolates the composed picture: with frame
-                // generation the finished real frame is what optical flow sees.
-                if let Some(world) = self.frame_gen.world_texture()
-                    && world.size() == texture.size()
-                    && texture.format() == self.config.format
-                    && self.executor.is_some()
-                    && self.output.frame.overlay_format != self.output.frame.format
-                {
-                    encoder.copy_texture_to_texture(
-                        texture.as_image_copy(),
-                        world.as_image_copy(),
-                        world.size(),
-                    );
-                }
                 (texture, view, self.output.frame.overlay_format)
             }
             None => (target_texture, view_target, self.output.frame.format),
