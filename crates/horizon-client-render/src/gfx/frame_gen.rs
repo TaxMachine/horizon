@@ -18,6 +18,7 @@ mod interpolation;
 pub(in crate::gfx) mod motion;
 mod optical_flow;
 
+use super::external;
 use glam::{DMat4, DVec3, Mat4};
 use std::{
     sync::{
@@ -52,6 +53,8 @@ fn debug() -> Option<&'static str> {
 
 pub struct FrameGen {
     pub on: bool,
+    /// The refusal reason last logged, so a standing one logs once, not per frame.
+    pub logged_refusal: Option<String>,
     /// The present thread failed to show a frame (or died): until the renderer has
     /// acquired a frame itself, the normal path runs and handles the surface.
     pub paused: bool,
@@ -120,6 +123,7 @@ impl FrameGen {
     pub fn new() -> Self {
         Self {
             on: false,
+            logged_refusal: None,
             paused: false,
             refused: false,
             no_room: false,
@@ -276,6 +280,12 @@ impl FrameGen {
         pair
     }
 
+    /// The world target's texture, where one was made this frame: for the
+    /// pack-composed picture's copy at the finish step.
+    pub fn world_texture(&self) -> Option<&wgpu::Texture> {
+        self.gpu.as_ref().map(|g| g.world.texture())
+    }
+
     /// The world's target at the screen's size this frame, where `Post::finish` draws, in
     /// the frame's `format`.
     pub fn world(
@@ -306,7 +316,9 @@ impl FrameGen {
                     // COPY_SRC: the interpolation keeps it as the previous frame.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
+                        | wgpu::TextureUsages::COPY_SRC
+                        // A native pack's composed real frame is copied in as the world.
+                        | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 })
                 .create_view(&Default::default());
@@ -482,9 +494,48 @@ impl super::Renderer {
         let world = self
             .frame_gen
             .world(&self.device, &self.world_post, &self.config, format);
-        let timing = self.own_timing.as_mut();
-        self.world_post
-            .finish(&mut self.uploads, encoder, &world, timing);
+        // A native pack composes the picture itself: its post chain ran in the
+        // frame (`run_post` on the scaled world), and its output draws onto
+        // whatever would otherwise show the engine's resolve — the frame's
+        // world (which optical flow and the interpolation see) and the real
+        // frame — so no vanilla picture leaks between generated frames.
+        let native_tonemap = self.external.is_some() && !frame.title;
+        if !native_tonemap {
+            let timing = self.own_timing.as_mut();
+            self.world_post
+                .finish(&mut self.uploads, encoder, &world, timing);
+        } else {
+            let engine_resolve = self.executor.as_ref().is_some_and(|c| c.engine_resolve);
+            let resolved = engine_resolve
+                .then(|| {
+                    (self.world_post).resolve_taa_staged(
+                        &self.device,
+                        &mut self.uploads,
+                        encoder,
+                        self.own_timing.as_mut(),
+                    )
+                })
+                .flatten()
+                .or_else(|| {
+                    let fxaa = (engine_resolve && self.world_post.antialias)
+                        .then(|| self.world_post.resolved(&self.device))
+                        .flatten()?;
+                    self.world_post.finish(
+                        &mut self.uploads,
+                        encoder,
+                        &fxaa,
+                        self.own_timing.as_mut(),
+                    );
+                    Some(fxaa)
+                });
+            let native = self.external.as_mut().expect("checked above");
+            native.run_output(external::WorldOutput {
+                device: &self.device,
+                encoder,
+                screen: &world,
+                resolved: resolved.as_ref(),
+            });
+        }
         let peak = self
             .hdr
             .as_ref()
@@ -496,8 +547,32 @@ impl super::Renderer {
         let made_onto = match peak {
             Some(_) => (view_target, target),
             None => {
-                self.frame_gen
-                    .show_world(encoder, &self.world_post, view_target, false);
+                if native_tonemap {
+                    let native = self.external.as_mut().expect("checked above");
+                    native.run_output(external::WorldOutput {
+                        device: &self.device,
+                        encoder,
+                        screen: view_target,
+                        resolved: None,
+                    });
+                    // The composed real frame is the picture optical flow and
+                    // the interpolation should see: copy it into the frame's
+                    // world (both at the surface's format).
+                    let world = self.frame_gen.world(
+                        &self.device,
+                        &self.world_post,
+                        &self.config,
+                        self.config.format,
+                    );
+                    encoder.copy_texture_to_texture(
+                        target.as_image_copy(),
+                        world.texture().as_image_copy(),
+                        world.texture().size(),
+                    );
+                } else {
+                    self.frame_gen
+                        .show_world(encoder, &self.world_post, view_target, false);
+                }
                 (&generated_view, generated)
             }
         };
@@ -520,8 +595,18 @@ impl super::Renderer {
         }
         if peak.is_some() {
             let debug = made && generated_only();
-            self.frame_gen
-                .show_world(encoder, &self.world_post, view_target, debug);
+            if native_tonemap && !debug {
+                let native = self.external.as_mut().expect("checked above");
+                native.run_output(external::WorldOutput {
+                    device: &self.device,
+                    encoder,
+                    screen: view_target,
+                    resolved: None,
+                });
+            } else {
+                self.frame_gen
+                    .show_world(encoder, &self.world_post, view_target, debug);
+            }
         }
         made
     }
@@ -541,7 +626,8 @@ impl super::Renderer {
     }
 }
 
-/// A frame to draw into, like the swapchain's.
+/// A frame to draw into, like the swapchain's. The 8-bit surface format: the pack's
+/// output pass and the overlays both draw their picture at it, as on the swapchain.
 fn frame(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Frame generation frame"),
