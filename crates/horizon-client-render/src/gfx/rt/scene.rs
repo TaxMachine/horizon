@@ -51,6 +51,20 @@ use retained::Retained;
 
 /// BLAS builds per frame at most: a world that just loaded builds over a few frames.
 const BUILDS_PER_FRAME: usize = 512;
+/// BLAS compactions asked for per frame at most, and none while sections stream in. Compaction
+/// is a memory saving, and asking for it while the queue is busy has deadlocked RADV: the copy
+/// takes wgpu-core's `command_indices` write lock, the submit thread holds it across its own
+/// `vkQueueSubmit`, and a frame's worth of BLAS builds keeps that submit long enough for the
+/// render thread to wait on it for good (a frozen window, then the watchdog). A quiet scene
+/// compacts a few per frame and gets there in seconds anyway.
+const COMPACTIONS_PER_FRAME: usize = 8;
+
+/// Whether BLAS compaction may run (`HORIZON_RAY_COMPACT=1`): off by default because of the
+/// wgpu-core lock order in [`RayScene::compact`]'s comment.
+fn compaction_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("HORIZON_RAY_COMPACT").is_ok_and(|v| v == "1"))
+}
 /// Bytes per vertex in the store.
 const STRIDE: u64 = std::mem::size_of::<TerrainVertex>() as u64;
 /// Bytes per quad in the look store.
@@ -677,9 +691,29 @@ impl RayScene {
 
     /// Compacts BLAS built on earlier frames: built with room to spare, a compacted copy (made
     /// once the GPU has measured it) takes about a quarter. Whether a BLAS was replaced.
+    ///
+    /// Only while no section is being built or meshed this frame, and a few per frame
+    /// ([`COMPACTIONS_PER_FRAME`]): the copy's queue work must not race a streaming frame's
+    /// submit.
     fn compact(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        // wgpu-core 30.0.1's `Queue::compact_blas` takes `Queue::pending_writes` before
+        // `Device::command_indices`, the reverse of its own lock rank (and of `Queue::present`,
+        // which holds `command_indices` across `pending_writes`). With a present thread running
+        // (frame generation's) the two orders meet and both threads wait for good: a frozen
+        // window, then an abort with no panic. Compaction is a memory saving, never correctness,
+        // so it is opt-in until wgpu fixes the order.
+        if !compaction_enabled() {
+            self.to_compact.clear();
+            self.compacting.clear();
+            return false;
+        }
+        let quiet = self.dirty.is_empty();
+        if !quiet {
+            return false;
+        }
         let mut changed = false;
         let blas = &mut self.blas;
+        let mut left = COMPACTIONS_PER_FRAME;
         self.compacting.retain(|(key, b)| {
             if blas.get(key) != Some(b) {
                 return false;
@@ -687,6 +721,10 @@ impl RayScene {
             if !b.ready_for_compaction() {
                 return true;
             }
+            if left == 0 {
+                return true;
+            }
+            left -= 1;
             // Without the memory for the copy the part keeps its uncompacted BLAS.
             if let Some(compact) = out_of_memory_free(device, || queue.compact_blas(b)) {
                 blas.insert(*key, compact);
@@ -695,7 +733,11 @@ impl RayScene {
             false
         });
         // Built and submitted last frame: the GPU can now measure them.
-        for (key, b) in std::mem::take(&mut self.to_compact) {
+        let mut measuring = std::mem::take(&mut self.to_compact);
+        if measuring.len() > COMPACTIONS_PER_FRAME {
+            self.to_compact = measuring.split_off(COMPACTIONS_PER_FRAME);
+        }
+        for (key, b) in measuring {
             if self.blas.get(&key) == Some(&b) {
                 b.prepare_compaction_async(|_| {});
                 self.compacting.push((key, b));
