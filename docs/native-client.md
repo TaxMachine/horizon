@@ -9,7 +9,7 @@ craft in the 2x2 inventory grid or on a crafting table, and save and reload worl
 in vanilla's Anvil format.
 
 **Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](status.md#what-the-harnesses-compare)
-in the README scores each subsystem against vanilla and lists what is still
+scores each subsystem against vanilla and lists what is still
 missing; [Rust rewrite status](rust-parity.md) has the details.
 
 On Windows, the launcher uses a stable executable path for each game home across
@@ -17,6 +17,26 @@ release and native-mod updates. Its private runtime copy lives under the launche
 data folder in `run/<home key>/game/`; installed versions remain intact. Opening a
 world to other machines can still require an initial Windows Firewall permission.
 The launcher does not create firewall rules or change network-profile settings.
+
+## Find your best graphics settings
+
+From the title screen, open **Options → Video Settings → Graphics Benchmark**.
+**Find my best settings** samples seven fixed workloads (dense and far terrain,
+entities, block entities, particles and weather, a resource pack, and inventory
+over a world). **Run thorough benchmark** samples each workload twice for longer.
+Both compare frame rate, 1% lows, and loading time. Leave Horizon at the title
+while it measures: another world or game can distort the comparison.
+
+The benchmark opens a separate worker window using a temporary world and its own
+settings. If a trial crashes or times out, Horizon skips that combination. If you
+close Horizon or it crashes, the next title screen resumes where it stopped.
+Saved results are local to the instance, GPU, driver and game build. After an
+update, run again to get a current recommendation.
+
+Review the results and changed settings, then choose **Apply recommended
+settings**. Nothing changes until you apply. A new graphics API or worker count
+takes effect the next time you start the game. **Undo benchmark settings** restores
+the previous settings if they have not been manually changed since applying.
 
 ## musl Linux: manual installation
 
@@ -65,7 +85,7 @@ Use current stable Rust (1.90+) and JDK 25 (Python 3.11+ only for the developmen
 harnesses). A checkout never
 downloads the game: resource preparation imports **your own copy** (the 26.3
 client from your official launcher install, and the 26.3 server jar you
-downloaded yourself; see [Build from source](#run-from-a-checkout)),
+downloaded yourself),
 verifies it against the pinned checksums, runs vanilla's data generator and small
 exporters against those jars, and extracts the jar's assets and data into ignored
 `.local/horizon-client/26.3/`. Sounds (about 380 MB) are copied from your
