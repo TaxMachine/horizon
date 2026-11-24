@@ -51,6 +51,14 @@ fn debug() -> Option<&'static str> {
         .as_deref()
 }
 
+/// Frame generation with a native shader pack, unless `HORIZON_FRAMEGEN_NATIVE_PACK=0`.
+/// Read once: the frame's gate asks every frame.
+pub(super) fn native_pack_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED
+        .get_or_init(|| std::env::var("HORIZON_FRAMEGEN_NATIVE_PACK").map_or(true, |v| v != "0"))
+}
+
 pub struct FrameGen {
     pub on: bool,
     /// The refusal reason last logged, so a standing one logs once, not per frame.
@@ -497,7 +505,7 @@ impl super::Renderer {
         // the engine's resolve wherever the picture lands — the frame's world
         // (what optical flow and the interpolation see, at the frame's format)
         // and the real frame — so no vanilla picture leaks into the made ones.
-        let native_tonemap = self.executor.is_some() && !frame.title;
+        let native_tonemap = self.executor.is_some() && self.external.is_some() && !frame.title;
         // A pack without post passes reads the engine's resolve of the world.
         let engine_resolve = self.executor.as_ref().is_some_and(|c| c.engine_resolve);
         let resolved = (native_tonemap && engine_resolve)
