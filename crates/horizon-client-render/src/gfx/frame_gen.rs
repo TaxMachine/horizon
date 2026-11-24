@@ -358,14 +358,14 @@ impl FrameGen {
     }
 
     /// Copy this frame's world onto `screen` for the real frame, or the made frame's
-    /// (`made`, after `generate`). `hdr`: `screen` is the float HDR frame, where the
-    /// frames' own post fits; else it is the swapchain's view, at the surface's format.
+    /// (`made`, after `generate`). The post is the one built for `screen`'s own format: the
+    /// swapchain's 8-bit one, or the frame's (a 0.2 pack's float frame, HDR's).
     pub fn show_world(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
         made: bool,
-        hdr: bool,
     ) {
         let gpu = self.gpu.as_ref().expect("world() ran this frame");
         let group = if made {
@@ -373,8 +373,7 @@ impl FrameGen {
         } else {
             &gpu.present_world
         };
-        let post = if hdr { &gpu.present } else { &gpu.surface };
-        post.finish_with(encoder, screen, group, None);
+        post_for(gpu, format).finish_with(encoder, screen, group, None);
     }
 
     /// Draw the made frame's world onto `generated`. `peak`: on the float frame, the
@@ -387,6 +386,7 @@ impl FrameGen {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         generated: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
         camera: &Camera,
         peak: Option<f32>,
     ) -> bool {
@@ -428,14 +428,10 @@ impl FrameGen {
             },
         );
         gpu.reset = false;
-        // The made frame lands in the float HDR frame (`peak`) with the real one, or
-        // straight in the surface's own frames without it: the post that writes it is
-        // the one built for where it lands.
-        let post = if peak.is_some() {
-            &gpu.present
-        } else {
-            &gpu.surface
-        };
+        // The made frame lands in the float HDR frame with the real one, or straight in the
+        // surface's own frames without it: the post that writes it is the one built for that
+        // texture's own format, whatever the caller says the frame is.
+        let post = post_for(gpu, format);
         if debug() == Some("motion") {
             let group = gpu.present.bind(device, &object_motion);
             post.finish_with(encoder, generated, &group, None);
@@ -582,15 +578,21 @@ impl super::Renderer {
                     });
                 } else {
                     self.frame_gen
-                        .show_world(encoder, view_target, false, false);
+                        .show_world(encoder, view_target, target.format(), false);
                 }
                 (&generated_view, generated)
             }
         };
         let (device, queue) = (&self.device, &self.queue);
-        let made = self
-            .frame_gen
-            .generate(device, queue, encoder, made_onto.0, camera, peak);
+        let made = self.frame_gen.generate(
+            device,
+            queue,
+            encoder,
+            made_onto.0,
+            made_onto.1.format(),
+            camera,
+            peak,
+        );
         // With HDR output, a reset's world too under the debug view, which shows `generated`.
         if made || peak.is_some() && generated_only() {
             self.draw_overlay(encoder, frame, made_onto.0, made_onto.1, overlay);
@@ -609,7 +611,8 @@ impl super::Renderer {
                     resolved: None,
                 });
             } else {
-                self.frame_gen.show_world(encoder, view_target, debug, true);
+                self.frame_gen
+                    .show_world(encoder, view_target, target.format(), debug);
             }
         }
         made
@@ -627,6 +630,17 @@ impl super::Renderer {
         if self.frame_gen.shown() {
             self.drop_hdr_marker();
         }
+    }
+}
+
+/// The post that can write a texture in `format`: the frames' own when it is the frame's
+/// format, else the surface's. srgb is the view's business, not the pipeline's.
+fn post_for(gpu: &Gpu, format: wgpu::TextureFormat) -> &super::world_post::Post {
+    let format = format.remove_srgb_suffix();
+    if format == gpu.format.remove_srgb_suffix() {
+        &gpu.present
+    } else {
+        &gpu.surface
     }
 }
 

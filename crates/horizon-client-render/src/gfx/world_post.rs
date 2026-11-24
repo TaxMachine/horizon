@@ -712,6 +712,27 @@ impl Post {
         }
     }
 
+    /// Made again for `format` where the frame changed under it (an HDR or pack change a
+    /// renderer remake has not caught up with), keeping the settings it runs with.
+    pub fn refit(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if self.format == format {
+            return;
+        }
+        let (scale, antialias, taa, upscale, sharpness) = (
+            self.scale,
+            self.antialias,
+            self.taa,
+            self.upscale,
+            self.sharpness,
+        );
+        *self = Self::new(device, format);
+        self.scale = scale;
+        self.antialias = antialias;
+        self.taa = taa;
+        self.upscale = upscale;
+        self.set_sharpness(device, sharpness);
+    }
+
     /// The Upscaling Sharpness setting, 0..=1: rebuilds the sharpen pipeline when it changed.
     pub fn set_sharpness(&mut self, device: &wgpu::Device, sharpness: f32) {
         let sharpness = sharpness.clamp(0.0, 1.0);

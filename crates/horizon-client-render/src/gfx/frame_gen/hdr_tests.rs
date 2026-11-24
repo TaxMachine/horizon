@@ -167,9 +167,15 @@ impl Run {
         let source = upload(device, queue, pixels);
         self.post
             .finish_with(&mut encoder, &world, &self.post.bind(device, &source), None);
-        let made = self
-            .fg
-            .generate(device, queue, &mut encoder, made, &self.camera, Some(PEAK));
+        let made = self.fg.generate(
+            device,
+            queue,
+            &mut encoder,
+            made,
+            FLOAT,
+            &self.camera,
+            Some(PEAK),
+        );
         queue.submit([encoder.finish()]);
         self.camera.reproject = Some(Mat4::IDENTITY);
         made

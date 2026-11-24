@@ -8678,6 +8678,11 @@ impl Renderer {
         output: output::EffectiveOutput,
     ) -> Result<bool> {
         debug_assert_eq!(output.encoding, self.hdr.as_ref().map(|hdr| hdr.output));
+        // The frame the output reports is the one drawn: a post made for another format (a
+        // renderer made before the frame changed, or the reverse) would draw into it with the
+        // wrong attachments and fail validation.
+        self.world_post
+            .refit(&self.device, self.output.frame.format);
         // Its steps as spans (HORIZON_SPIKES): each lap names the step that just ended.
         let mut laps = crate::spans::laps();
         let landing = Instant::now();
