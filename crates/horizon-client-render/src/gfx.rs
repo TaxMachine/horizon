@@ -8882,8 +8882,10 @@ impl Renderer {
         } else {
             self.frame_gen.stop();
         }
+        laps.lap("r_fg");
         // Waits for the submit thread since the last frame's present (this frame's uploads).
         let queued = self.queue.take_waited();
+        laps.lap("r_wait_submit");
         let acquire = Instant::now();
         // Its frames and world target are made here, before the frame is drawn: without the room
         // for them (#13624) frame generation is off until the surface is configured again.
@@ -8924,6 +8926,7 @@ impl Renderer {
             self.surface.as_ref().map(|s| s.get_current_texture())
         };
         self.last_wait = landed + queued + acquire.elapsed();
+        laps.lap("r_surface_acquire");
         // Inside the acquire's time already.
         self.queue.take_waited();
         let (surface_frame, reconfigure) = match acquired {
@@ -8965,6 +8968,7 @@ impl Renderer {
             self.acquire_validation_failures = 0;
             self.frame_gen.paused = false;
         }
+        laps.lap("r_surface_frame");
         // A window frame's own scopes, read before its commands are finished (`frame_lost`):
         // where something no fallback of its own covers runs out of memory (#13624), the frame
         // is given up rather than submitted with what failed. Native error scopes resolve at
@@ -8995,6 +8999,7 @@ impl Renderer {
                     .unwrap_or(image)
             }
         };
+        laps.lap("r_target");
         // The section copies staged since the last frame, in a command buffer of their own
         // submitted before the frame's: a frame given up (`abandon_frame`) still submits them.
         let copies = self.take_section_copies();
@@ -13503,6 +13508,10 @@ impl Renderer {
         // A 0.2 pack in SDR: its picture finishes on 8 bits before the hand, the camera overlays
         // and the HUD draw over it (`overlay_format`). With frame generation the finish lands
         // on its real frame, whose format is the surface's.
+        //
+        // Under HDR output the image is the HDR one `hdr.present_staged` writes at the end, so a
+        // finish onto it is thrown away: only a screenshot or an export needs the 8-bit picture
+        // of the frame. Skipping it saves a full-frame conversion and a full-screen pass a frame.
         let finished = (self.output.frame.overlay_format != self.output.frame.format)
             .then(|| {
                 let image = surface_frame.as_ref().map(|f| &f.texture);
