@@ -103,10 +103,18 @@ struct Gpu {
     /// format, where the renderer's `Post` writes the frame's (a pack's float
     /// one). The groups it binds sample the same float textures.
     present: super::world_post::Post,
+    /// The made frame's other landing: the frames the present thread flips
+    /// (`frames`) and the SDR swapchain, at the surface's format. With HDR
+    /// output the made frame goes to the frame first (`present`, at the
+    /// frame's format) like the real one; without it, straight into these.
+    /// Which of the two a write lands in is `generate`'s `peak`.
+    surface: super::world_post::Post,
     present_world: wgpu::BindGroup,
     present_output: wgpu::BindGroup,
     size: [u32; 2],
     format: wgpu::TextureFormat,
+    /// The surface format `screen` was built for.
+    screen_format: wgpu::TextureFormat,
     flow: optical_flow::OpticalFlow,
     interpolation: interpolation::Interpolation,
     /// This frame's world at the screen's size, and bindings that copy it or the
@@ -301,11 +309,9 @@ impl FrameGen {
         format: wgpu::TextureFormat,
     ) -> wgpu::TextureView {
         let size = [config.width, config.height];
-        if self
-            .gpu
-            .as_ref()
-            .is_none_or(|g| g.size != size || g.format != format)
-        {
+        if self.gpu.as_ref().is_none_or(|g| {
+            g.size != size || g.format != format || g.screen_format != config.format
+        }) {
             let world = device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some("Frame generation world"),
@@ -326,14 +332,21 @@ impl FrameGen {
                 })
                 .create_view(&Default::default());
             let interpolation = interpolation::Interpolation::new(device, size);
-            let present = super::world_post::Post::new(device, config.format);
+            // The frame's format for the frames' own textures (the world and the made
+            // frames), the surface's for the screen: under HDR10, or with a float frame
+            // and HDR off, the two differ, and a post built for one is a validation
+            // panic on the other's pass.
+            let present = super::world_post::Post::new(device, format);
+            let surface = super::world_post::Post::new(device, config.format);
             let present_world = present.bind(device, &world);
             let present_output = present.bind(device, interpolation.output());
             self.gpu = Some(Gpu {
                 size,
                 format,
+                screen_format: config.format,
                 flow: optical_flow::OpticalFlow::new(device, size),
                 present,
+                surface,
                 present_world,
                 present_output,
                 interpolation,
@@ -345,12 +358,14 @@ impl FrameGen {
     }
 
     /// Copy this frame's world onto `screen` for the real frame, or the made frame's
-    /// (`made`, after `generate`).
+    /// (`made`, after `generate`). `hdr`: `screen` is the float HDR frame, where the
+    /// frames' own post fits; else it is the swapchain's view, at the surface's format.
     pub fn show_world(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
         made: bool,
+        hdr: bool,
     ) {
         let gpu = self.gpu.as_ref().expect("world() ran this frame");
         let group = if made {
@@ -358,7 +373,8 @@ impl FrameGen {
         } else {
             &gpu.present_world
         };
-        gpu.present.finish_with(encoder, screen, group, None);
+        let post = if hdr { &gpu.present } else { &gpu.surface };
+        post.finish_with(encoder, screen, group, None);
     }
 
     /// Draw the made frame's world onto `generated`. `peak`: on the float frame, the
@@ -412,17 +428,23 @@ impl FrameGen {
             },
         );
         gpu.reset = false;
+        // The made frame lands in the float HDR frame (`peak`) with the real one, or
+        // straight in the surface's own frames without it: the post that writes it is
+        // the one built for where it lands.
+        let post = if peak.is_some() {
+            &gpu.present
+        } else {
+            &gpu.surface
+        };
         if debug() == Some("motion") {
             let group = gpu.present.bind(device, &object_motion);
-            gpu.present.finish_with(encoder, generated, &group, None);
+            post.finish_with(encoder, generated, &group, None);
             return true;
         }
         if reset {
-            gpu.present
-                .finish_with(encoder, generated, &gpu.present_world, None);
+            post.finish_with(encoder, generated, &gpu.present_world, None);
         } else {
-            gpu.present
-                .finish_with(encoder, generated, &gpu.present_output, None);
+            post.finish_with(encoder, generated, &gpu.present_output, None);
         }
         !reset
     }
@@ -559,7 +581,8 @@ impl super::Renderer {
                         resolved: resolved.as_ref(),
                     });
                 } else {
-                    self.frame_gen.show_world(encoder, view_target, false);
+                    self.frame_gen
+                        .show_world(encoder, view_target, false, false);
                 }
                 (&generated_view, generated)
             }
@@ -586,7 +609,7 @@ impl super::Renderer {
                     resolved: None,
                 });
             } else {
-                self.frame_gen.show_world(encoder, view_target, debug);
+                self.frame_gen.show_world(encoder, view_target, debug, true);
             }
         }
         made
